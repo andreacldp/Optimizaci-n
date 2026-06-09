@@ -1,0 +1,173 @@
+import pandas as pd
+import math
+import matplotlib.pyplot as plt
+from pulp import *
+
+Q              = 30      # capacidad del vehiculo en despensas
+RENTA_SIENNA   = 15000   # vehiculo: renta de Sienna por ruta
+GASOLINA       = 3500    # costo de gasolina por ruta
+PRECIO_AURRERA = 350     # precio por despensa en Aurrera (< 10 despensas)
+PRECIO_GRANEL  = 280     # precio por despensa a granel  (>= 10 despensas)
+
+W_DISC  = 5.5
+W_60MAS = 5.0
+W_MUJ   = 3.0
+W_NINOS = 2.5
+
+LAT_DEP =  25.6514
+LON_DEP = -100.2895
+
+df = pd.read_csv("dataset.csv", encoding="latin-1")
+df.columns = df.columns.str.strip()
+df = df[df["Nombre_mun"].str.lower().str.contains("mier", na=False)].copy()
+df = df.reset_index(drop=True)
+
+deposito = pd.DataFrame([{
+    "Nombre_loc": "Tec de Monterrey", "Latitud": LAT_DEP, "Longitud": LON_DEP,
+    "P_15A49_F": 0, "P_60YMAS": 0, "POB0_14": 0,
+    "Poblacion con discapacidad": 0, "demanda": 0
+}])
+df = pd.concat([deposito, df], ignore_index=True)
+
+for c in ["P_15A49_F","P_60YMAS","POB0_14","Poblacion con discapacidad","demanda"]:
+    df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+N = list(df.index)
+C = [i for i in N if i != 0]
+
+# VULNERABILIDAD
+
+df["score"] = (
+      W_DISC  * df["Poblacion con discapacidad"]
+    + W_60MAS * df["P_60YMAS"]
+    + W_MUJ   * df["P_15A49_F"]
+    + W_NINOS * df["POB0_14"]
+)
+
+s = df["score"].to_dict()
+d = df["demanda"].to_dict()
+
+print("Localidades: {}".format(len(C)))
+print("Demanda total: {:.0f} despensas".format(sum(d[i] for i in C)))
+
+print("\n Top 10 mas vulnerables")
+print(df[df.index != 0].sort_values("score", ascending=False).head(10)[
+    ["Nombre_loc", "Poblacion con discapacidad", "P_60YMAS", "demanda", "score"]
+].to_string(index=False))
+
+# DISTANCIAS
+
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    a = math.sin(math.radians(lat2-lat1)/2)**2 + \
+        math.cos(phi1)*math.cos(phi2)*math.sin(math.radians(lon2-lon1)/2)**2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
+dist = {(i,j): haversine(df.loc[i,"Latitud"], df.loc[i,"Longitud"],
+                          df.loc[j,"Latitud"], df.loc[j,"Longitud"])
+        for i in N for j in N if i != j}
+
+max_viajes = math.ceil(sum(d[i] for i in C) / Q)
+arcos      = [(i,j) for i in N for j in N if i != j]
+
+# COSTO DE COMPRA POR RUTA
+# se usa precio de Aurrera para rutas con menos de 10 despensas y precio a granel para rutas con 10 o mas despensas
+costo_compra = {
+    i: PRECIO_AURRERA * d[i] if d[i] < 10 else PRECIO_GRANEL * d[i]
+    for i in C
+}
+
+# MODELO VRP
+# Variables:
+#   x[i,j] -> 1 si el vehiculo va del nodo i al nodo j
+#   y[i] -> 1 si la localidad i es visitada
+#   f[i,j] -> despensas acumuladas entregadas al salir de i a j
+#   r[k] -> 1 si la ruta k esta activa 
+
+model = LpProblem("VRP_MierNoriega", LpMaximize)
+
+x = LpVariable.dicts("x", arcos, 0, 1, LpBinary)
+y = LpVariable.dicts("y", C,     0, 1, LpBinary)
+f = LpVariable.dicts("f", arcos, 0)
+
+n_rutas = lpSum(x[(0,j)] for j in C)
+
+# Objetivo: maximizar score de vulnerabilidad
+model += lpSum(s[i] * y[i] for i in C)
+
+# Restriccion 1
+for i in C:
+    model += lpSum(x[(j,i)] for j in N if j!=i) == y[i], "entrada_{}".format(i)
+    model += lpSum(x[(i,j)] for j in N if j!=i) == y[i], "salida_{}".format(i)
+
+# Restriccion 2
+model += lpSum(x[(0,j)] for j in C) == lpSum(x[(i,0)] for i in C), "balance_dep"
+model += lpSum(x[(0,j)] for j in C) <= max_viajes, "max_rutas"
+
+# Restriccion 3
+for i in C:
+    model += (lpSum(x[(i,j)] for j in N if j!=i) ==
+              lpSum(x[(j,i)] for j in N if j!=i)), "balance_{}".format(i)
+
+# Restriccion 4
+for i in C:
+    model += (lpSum(f[(i,j)] for j in N if j!=i) -
+              lpSum(f[(j,i)] for j in N if j!=i) == d[i] * y[i]), "flujo_{}".format(i)
+for i,j in arcos:
+    model += f[(i,j)] <= Q * x[(i,j)], "cap_{}_{}".format(i,j)
+for j in C:
+    model += f[(0,j)] == 0, "vacio_{}".format(j)
+for i in C:
+    model += f[(i,0)] <= Q * x[(i,0)], "regreso_{}".format(i)
+
+# RESULTADOS Y RUTAS
+
+model.solve(PULP_CBC_CMD(timeLimit=120, gapRel=0.05, msg=1))
+
+def val(v): return value(v) if value(v) is not None else 0.0
+
+visitados  = [i for i in C if val(y[i]) > 0.5]
+arcos_on   = {(i,j) for i,j in arcos if val(x[(i,j)]) > 0.5}
+salidas    = [j for j in C if (0,j) in arcos_on]
+
+print("RESULTADOS")
+print("Status        : {}".format(LpStatus[model.status]))
+print("Localidades   : {} de {}".format(len(visitados), len(C)))
+print("Despensas     : {:.0f} de {:.0f}".format(
+    sum(d[i] for i in visitados), sum(d[i] for i in C)))
+print("Score total   : {:.2f}".format(sum(s[i] for i in visitados)))
+print("Rutas activas : {}".format(len(salidas)))
+
+# Reconstruir rutas y calcular costos
+print("\nRUTAS:")
+rutas_finales  = []
+total_gasolina = 0
+total_compra   = 0
+
+for inicio in salidas:
+    ruta, actual, vistos = [inicio], inicio, {0, inicio}
+    for _ in range(len(N)):
+        sig = next((j for j in N if (actual,j) in arcos_on and j not in vistos), None)
+        if sig is None or sig == 0: break
+        ruta.append(sig)
+        vistos.add(sig)
+        actual = sig
+    rutas_finales.append(ruta)
+
+    dem_ruta    = sum(d[i] for i in ruta)
+    compra_ruta = sum(costo_compra[i] for i in ruta)
+    tienda      = "granel" if dem_ruta >= 10 else "Aurrera"
+    total_gasolina += GASOLINA
+    total_compra   += compra_ruta
+
+    noms = " -> ".join(["Deposito"] + [df.loc[i,"Nombre_loc"] for i in ruta] + ["Deposito"])
+    print("\n  {}".format(noms))
+    print("  Despensas: {:.0f}/{}  |  Compra: {} (${}  )  |  Gasolina: ${}".format(
+        dem_ruta, Q, tienda, compra_ruta, GASOLINA))
+
+print("RESUMEN DE COSTOS")
+print("Renta Sienna  : ${}".format(RENTA_SIENNA))
+print("Gasolina total: ${}".format(total_gasolina))
+print("Compra total  : ${}".format(int(total_compra)))
+print("TOTAL         : ${}".format(int(RENTA_SIENNA + total_gasolina + total_compra)))
