@@ -83,7 +83,6 @@ costo_compra = {
 #   x[i,j] -> 1 si el vehiculo va del nodo i al nodo j
 #   y[i] -> 1 si la localidad i es visitada
 #   f[i,j] -> despensas acumuladas entregadas al salir de i a j
-#   r[k] -> 1 si la ruta k esta activa 
 
 model = LpProblem("VRP_MierNoriega", LpMaximize)
 
