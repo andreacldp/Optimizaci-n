@@ -74,46 +74,59 @@ costo_compra = {
 # MODELO VRP
 model = LpProblem("VRP_MierNoriega", LpMaximize)
 
-x = LpVariable.dicts("x", arcos, 0, 1, LpBinary)
-y = LpVariable.dicts("y", C,     0, 1, LpBinary)
-f = LpVariable.dicts("f", arcos, 0)
-g = LpVariable.dicts("g", arcos, 0) 
+x = LpVariable.dicts("x", arcos, 0, 1, LpBinary) # 1 si el camion viaja directamente del punto i al punto j. 0 si no.
+y = LpVariable.dicts("y", C,     0, 1, LpBinary) # 1 si visitamos la comunidad i. 0 si no.
+f = LpVariable.dicts("f", arcos, 0) # cantidad de despensas transportadas en el arco (i,j)
+g = LpVariable.dicts("g", arcos, 0) # kilometraje acumulado al usar el arco (i,j)
 
 # FUNCION OBJETIVO
 model += lpSum((s[i] + 1000) * y[i] for i in C)
 
 # Restricciones de flujo de visitas
+# transportes que entran = transportes que salen
 for i in C:
     model += lpSum(x[(j,i)] for j in N if j!=i) == y[i], "entrada_{}".format(i)
     model += lpSum(x[(i,j)] for j in N if j!=i) == y[i], "salida_{}".format(i)
 
+# el número de transportes que salen del depósito es igual al número de rutas que regresan al depósito
 model += lpSum(x[(0,j)] for j in C) == lpSum(x[(i,0)] for i in C), "balance_dep"
 model += lpSum(x[(0,j)] for j in C) <= max_viajes, "max_rutas"
 
+# si el transporte llega a una comunidad, también sale de esta
 for i in C:
     model += (lpSum(x[(i,j)] for j in N if j!=i) ==
               lpSum(x[(j,i)] for j in N if j!=i)), "balance_{}".format(i)
 
 # Restricciones de capacidad de carga (Despensas)
+# se garantiza que cada localidad reciba su demanda si se visita
 for i in C:
     model += (lpSum(f[(i,j)] for j in N if j!=i) -
               lpSum(f[(j,i)] for j in N if j!=i) == d[i] * y[i]), "flujo_{}".format(i)
+    
+# el transporte no puede llevar más despensas que su capacidad 
 for i,j in arcos:
     model += f[(i,j)] <= Q * x[(i,j)], "cap_{}_{}".format(i,j)
+
+# se comienza sin despensas
 for j in C:
     model += f[(0,j)] == 0, "vacio_{}".format(j)
+    
+# la suma de despensas entregadas no puede exceder la capacidad del transporte 
 for i in C:
     model += f[(i,0)] <= Q * x[(i,0)], "regreso_{}".format(i)
 
-# Restricción de Kilometraje máximo por ruta (700 km / Capacidad de Tanque / Jornada)
+# Restricción de Kilometraje máximo por ruta
+# se suman km cuando se va de una localidad a otra
 for i in C:
     model += (lpSum(g[(i,j)] for j in N if j!=i) - 
               lpSum(g[(j,i)] for j in N if j!=i) == lpSum(dist[(j,i)] * x[(j,i)] for j in N if j!=i)), "flujo_km_{}".format(i)
 
-for i,j in arcos: # El flujo de km no puede superar el límite establecido por el tanque
+# el flujo de km no puede superar el límite establecido por el tanque
+for i,j in arcos:
     model += g[(i,j)] <= LIMITE_KM_RUTA * x[(i,j)], "cap_km_{}_{}".format(i,j)
 
-for j in C: # Al salir del depósito el kilometraje acumulado de la ruta empieza en la distancia del primer arco
+# considera los km del tec hacia mier y noriega
+for j in C:
     model += g[(0,j)] == dist[(0,j)] * x[(0,j)], "inicio_km_{}".format(j)
 
 
@@ -122,6 +135,7 @@ model.solve(PULP_CBC_CMD(timeLimit=120, gapRel=0.05, msg=0))
 
 def val(v): return value(v) if value(v) is not None else 0.0
 
+# registramos las localidades que se visitaran, los arcos que se usaran y las rutas que salen del depósito
 visitados  = [i for i in C if val(y[i]) > 0.5]
 arcos_on   = {(i,j) for i,j in arcos if val(x[(i,j)]) > 0.5}
 salidas    = [j for j in C if (0,j) in arcos_on]
@@ -133,7 +147,7 @@ print("Despensas     : {:.0f} de {:.0f}".format(sum(d[i] for i in visitados), su
 print("Score total   : {:.2f}".format(sum(s[i] for i in visitados)))
 print("Rutas activas : {}".format(len(salidas)))
 
-# Reconstruir rutas y calcular costos corregidos
+# Reconstruir rutas y calcular costos
 print("\n DETALLE DE RUTAS")
 rutas_finales  = []
 total_gasolina = 0
@@ -141,10 +155,12 @@ total_compra   = 0
 total_renta    = 0
 total_distancia_global = 0
 
+# para cada transporte, se registran las localidades y km recorridos
 for inicio in salidas:
     ruta, actual, vistos = [inicio], inicio, {0, inicio}
     distancia_ruta = dist[(0, inicio)]
-    
+
+# se sigue la ruta hasta regresar al depósito, sumando distancias y registrando localidades visitadas    
     for _ in range(len(N)):
         sig = next((j for j in N if (actual,j) in arcos_on and j not in vistos), None)
         if sig is None or sig == 0: 
@@ -155,6 +171,7 @@ for inicio in salidas:
         vistos.add(sig)
         actual = sig
     
+    #cuando se regresa al depósito, se guarda la ruta completa y se calculan los costos
     rutas_finales.append(ruta)
 
     dem_ruta    = sum(d[i] for i in ruta)
