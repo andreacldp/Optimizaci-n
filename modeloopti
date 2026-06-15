@@ -3,20 +3,31 @@ import math
 import matplotlib.pyplot as plt
 from pulp import *
 
-Q              = 30      # capacidad del vehiculo en despensas
-RENTA_SIENNA   = 15000   # costo de renta de Sienna POR RUTA ACTIVA
+
+VEHICULOS = {
+    "Sienna/Odyssey": {"capacidad": 30, "renta": 15000},
+    "Sprinter":       {"capacidad": 60, "renta": 35000},
+}
+
+Q = max(v["capacidad"] for v in VEHICULOS.values())
+
 GASOLINA       = 3500    # costo de gasolina por ruta
 PRECIO_AURRERA = 350     # precio por despensa en Aurrera (< 10 despensas)
 PRECIO_GRANEL  = 280     # precio por despensa a granel  (>= 10 despensas)
 LIMITE_KM_RUTA = 700     # Limite de km por tanque / jornada por ruta
+
+COSTO_TRASLADO_DR_ARROYO = 15000
+
+ALIANZA_ACTIVA    = False
+DESCUENTO_ALIANZA = 0.5   # 50% de descuento si la alianza esta activa
 
 W_DISC  = 5.5
 W_60MAS = 5.0
 W_MUJ   = 3.0
 W_NINOS = 2.5
 
-LAT_DEP =  25.6514
-LON_DEP = -100.2895
+LAT_DEP = 24.7200
+LON_DEP = -100.1900
 
 df = pd.read_csv("dataset.csv", encoding="latin-1")
 df.columns = df.columns.str.strip()
@@ -24,7 +35,7 @@ df = df[df["Nombre_mun"].str.lower().str.contains("mier", na=False)].copy()
 df = df.reset_index(drop=True)
 
 deposito = pd.DataFrame([{
-    "Nombre_loc": "Tec de Monterrey", "Latitud": LAT_DEP, "Longitud": LON_DEP,
+    "Nombre_loc": "Dr. Arroyo", "Latitud": LAT_DEP, "Longitud": LON_DEP,
     "P_15A49_F": 0, "P_60YMAS": 0, "POB0_14": 0,
     "Poblacion con discapacidad": 0, "demanda": 0
 }])
@@ -88,11 +99,11 @@ for i in C:
     model += lpSum(x[(j,i)] for j in N if j!=i) == y[i], "entrada_{}".format(i)
     model += lpSum(x[(i,j)] for j in N if j!=i) == y[i], "salida_{}".format(i)
 
-# el número de transportes que salen del depósito es igual al número de rutas que regresan al depósito
+# el numero de transportes que salen del deposito es igual al numero de rutas que regresan al deposito
 model += lpSum(x[(0,j)] for j in C) == lpSum(x[(i,0)] for i in C), "balance_dep"
 model += lpSum(x[(0,j)] for j in C) <= max_viajes, "max_rutas"
 
-# si el transporte llega a una comunidad, también sale de esta
+# si el transporte llega a una comunidad, tambien sale de esta
 for i in C:
     model += (lpSum(x[(i,j)] for j in N if j!=i) ==
               lpSum(x[(j,i)] for j in N if j!=i)), "balance_{}".format(i)
@@ -102,30 +113,30 @@ for i in C:
 for i in C:
     model += (lpSum(f[(i,j)] for j in N if j!=i) -
               lpSum(f[(j,i)] for j in N if j!=i) == d[i] * y[i]), "flujo_{}".format(i)
-    
-# el transporte no puede llevar más despensas que su capacidad 
+
+# el transporte no puede llevar mas despensas que la capacidad maxima de la flota
 for i,j in arcos:
     model += f[(i,j)] <= Q * x[(i,j)], "cap_{}_{}".format(i,j)
 
 # se comienza sin despensas
 for j in C:
     model += f[(0,j)] == 0, "vacio_{}".format(j)
-    
-# la suma de despensas entregadas no puede exceder la capacidad del transporte 
+
+# la suma de despensas entregadas no puede exceder la capacidad del transporte
 for i in C:
     model += f[(i,0)] <= Q * x[(i,0)], "regreso_{}".format(i)
 
-# Restricción de Kilometraje máximo por ruta
+# Restriccion de Kilometraje maximo por ruta
 # se suman km cuando se va de una localidad a otra
 for i in C:
-    model += (lpSum(g[(i,j)] for j in N if j!=i) - 
+    model += (lpSum(g[(i,j)] for j in N if j!=i) -
               lpSum(g[(j,i)] for j in N if j!=i) == lpSum(dist[(j,i)] * x[(j,i)] for j in N if j!=i)), "flujo_km_{}".format(i)
 
-# el flujo de km no puede superar el límite establecido por el tanque
+# el flujo de km no puede superar el limite establecido por el tanque
 for i,j in arcos:
     model += g[(i,j)] <= LIMITE_KM_RUTA * x[(i,j)], "cap_km_{}_{}".format(i,j)
 
-# considera los km del tec hacia mier y noriega
+# considera los km de Dr. Arroyo hacia las localidades de Mier y Noriega
 for j in C:
     model += g[(0,j)] == dist[(0,j)] * x[(0,j)], "inicio_km_{}".format(j)
 
@@ -135,7 +146,7 @@ model.solve(PULP_CBC_CMD(timeLimit=120, gapRel=0.05, msg=0))
 
 def val(v): return value(v) if value(v) is not None else 0.0
 
-# registramos las localidades que se visitaran, los arcos que se usaran y las rutas que salen del depósito
+# registramos las localidades que se visitaran, los arcos que se usaran y las rutas que salen del deposito
 visitados  = [i for i in C if val(y[i]) > 0.5]
 arcos_on   = {(i,j) for i,j in arcos if val(x[(i,j)]) > 0.5}
 salidas    = [j for j in C if (0,j) in arcos_on]
@@ -146,6 +157,18 @@ print("Localidades   : {} de {}".format(len(visitados), len(C)))
 print("Despensas     : {:.0f} de {:.0f}".format(sum(d[i] for i in visitados), sum(d[i] for i in C)))
 print("Score total   : {:.2f}".format(sum(s[i] for i in visitados)))
 print("Rutas activas : {}".format(len(salidas)))
+
+
+# --- Asignacion del vehiculo mas barato que cubra la demanda de la ruta ---
+def elegir_vehiculo(demanda):
+    candidatos = [(nombre, v) for nombre, v in VEHICULOS.items() if v["capacidad"] >= demanda]
+    if not candidatos:
+        # ningun vehiculo de la flota alcanza (no deberia pasar si Q = capacidad maxima)
+        nombre, v = max(VEHICULOS.items(), key=lambda kv: kv[1]["capacidad"])
+        return nombre, v["renta"]
+    nombre, v = min(candidatos, key=lambda kv: kv[1]["renta"])
+    return nombre, v["renta"]
+
 
 # Reconstruir rutas y calcular costos
 print("\n DETALLE DE RUTAS")
@@ -160,39 +183,50 @@ for inicio in salidas:
     ruta, actual, vistos = [inicio], inicio, {0, inicio}
     distancia_ruta = dist[(0, inicio)]
 
-# se sigue la ruta hasta regresar al depósito, sumando distancias y registrando localidades visitadas    
+    # se sigue la ruta hasta regresar al deposito, sumando distancias y registrando localidades visitadas
     for _ in range(len(N)):
         sig = next((j for j in N if (actual,j) in arcos_on and j not in vistos), None)
-        if sig is None or sig == 0: 
+        if sig is None or sig == 0:
             distancia_ruta += dist[(actual, 0)]
             break
         distancia_ruta += dist[(actual, sig)]
         ruta.append(sig)
         vistos.add(sig)
         actual = sig
-    
-    #cuando se regresa al depósito, se guarda la ruta completa y se calculan los costos
+
+    # cuando se regresa al deposito, se guarda la ruta completa y se calculan los costos
     rutas_finales.append(ruta)
 
     dem_ruta    = sum(d[i] for i in ruta)
     compra_ruta = sum(costo_compra[i] for i in ruta)
     tienda      = "granel" if dem_ruta >= 10 else "Aurrera"
-    
+
+    vehiculo, renta_ruta = elegir_vehiculo(dem_ruta)
+
     total_gasolina         += GASOLINA
-    total_renta            += RENTA_SIENNA
+    total_renta            += renta_ruta
     total_compra           += compra_ruta
     total_distancia_global += distancia_ruta
 
-    noms = " -> ".join(["Deposito"] + [df.loc[i,"Nombre_loc"] for i in ruta] + ["Deposito"])
+    noms = " -> ".join(["Dr. Arroyo"] + [df.loc[i,"Nombre_loc"] for i in ruta] + ["Dr. Arroyo"])
     print("\n  Ruta:")
     print("  {}".format(noms))
     print("  Despensas : {:.0f}/{}  |  Tipo de Compra: {} (${:.0f})".format(dem_ruta, Q, tienda, compra_ruta))
     print("  Distancia : {:.2f} km / {} km limite".format(distancia_ruta, LIMITE_KM_RUTA))
-    print("  Costos    : Gasolina: ${} | Renta Vehiculo: ${}".format(GASOLINA, RENTA_SIENNA))
+    print("  Vehiculo  : {} (capacidad {} - renta ${})".format(vehiculo, VEHICULOS[vehiculo]["capacidad"], renta_ruta))
+    print("  Costos    : Gasolina: ${} | Renta Vehiculo: ${}".format(GASOLINA, renta_ruta))
+
+#Costo fijo de traslado de despensas hasta Dr. Arroyo
+if ALIANZA_ACTIVA:
+    costo_traslado = COSTO_TRASLADO_DR_ARROYO * (1 - DESCUENTO_ALIANZA)
+else:
+    costo_traslado = COSTO_TRASLADO_DR_ARROYO
 
 print("\n RESUMEN DE COSTOS TOTALES ")
-print("Renta Sienna (Por Ruta) : ${}".format(total_renta))
-print("Gasolina total          : ${}".format(total_gasolina))
-print("Compra de mercancia     : ${}".format(int(total_compra)))
+print("Traslado a Dr. Arroyo    : ${:.0f}{}".format(
+    costo_traslado, "  (con alianza, {:.0f}% de descuento)".format(DESCUENTO_ALIANZA*100) if ALIANZA_ACTIVA else ""))
+print("Renta vehiculos (rutas)  : ${}".format(total_renta))
+print("Gasolina total           : ${}".format(total_gasolina))
+print("Compra de mercancia      : ${}".format(int(total_compra)))
 print("Distancia Total Recorrida: {:.2f} km".format(total_distancia_global))
-print("Costo total   : ${}".format(int(total_renta + total_gasolina + total_compra)))
+print("Costo total              : ${}".format(int(costo_traslado + total_renta + total_gasolina + total_compra)))
